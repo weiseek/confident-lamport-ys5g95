@@ -10,6 +10,7 @@
 #include "CudaAtomicList.h"
 #include "../CudaUtil/cudaUtil.h"
 
+
 // Structures that exist on both host and device side
 struct CudaDeviceResult {
 	int thread;
@@ -73,6 +74,12 @@ private:
 	secp256k1::uint256 _stride;
 
 	//bool verifyKeyHash160(const secp256k1::uint256& privateKey, const secp256k1::ecpoint& publicKey, const unsigned int hash[5], bool compressed);
+	// Existing private members...
+	
+	bool _excludeOnPairs;
+	int _requiredConsecutivePairs;
+	
+	__device__ bool hasExactlyNPairsOfConsecutiveDigits(const secp256k1::uint256& privateKey, int n);
 
 public:
 
@@ -99,6 +106,30 @@ public:
 
 	// Update stride
 	virtual void updateStride(const secp256k1::uint256& stride);
+
+	virtual void setExcludeOnPairs(bool exclude);
+
+	virtual void setRequiredConsecutivePairs(int n);
 };
+
+__device__ bool CudaKeySearchDevice::hasExactlyNPairsOfConsecutiveDigits(const secp256k1::uint256& privateKey, int n)
+{
+    int pairCount = 0;
+    uint32_t lastDigit = privateKey.getWord(0) & 0xF;
+
+    for(int i = 0; i < 64; i++) {
+        uint32_t currentDigit = (privateKey.getWord(i / 8) >> ((i % 8) * 4)) & 0xF;
+        if(currentDigit == lastDigit) {
+            pairCount++;
+            if(pairCount > n) {
+                return false;
+            }
+            i++; // Skip next digit as it's part of the pair
+        }
+        lastDigit = currentDigit;
+    }
+
+    return pairCount == n;
+}
 
 #endif
