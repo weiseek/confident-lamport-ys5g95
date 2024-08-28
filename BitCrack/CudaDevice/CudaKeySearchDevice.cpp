@@ -463,3 +463,13 @@ void CudaKeySearchDevice::updateStride(const secp256k1::uint256& stride)
 
 	_iterations = 0;
 }
+
+void CudaKeySearchDevice::setExcludeOnPairs(bool exclude)
+{
+    _excludeOnPairs = exclude;
+}
+
+void CudaKeySearchDevice::setRequiredConsecutivePairs(int n)
+{
+    _requiredConsecutivePairs = n;
+}
