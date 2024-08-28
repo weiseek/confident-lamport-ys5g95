@@ -15,84 +15,72 @@ void CudaKeySearchDevice::cudaCall(cudaError_t err)
 
 CudaKeySearchDevice::CudaKeySearchDevice(int device, int threads, int pointsPerThread, int blocks)
 {
-	cuda::CudaDeviceInfo info;
-	try {
-		info = cuda::getDeviceInfo(device);
-		_deviceName = info.name;
-	}
-	catch (cuda::CudaException ex) {
-		throw KeySearchException(ex.msg);
-	}
+    cuda::CudaDeviceInfo info;
+    try {
+        info = cuda::getDeviceInfo(device);
+        _deviceName = info.name;
+    }
+    catch (cuda::CudaException ex) {
+        throw KeySearchException(ex.msg);
+    }
 
-	if (threads <= 0 || threads % 32 != 0) {
-		throw KeySearchException("The number of threads must be a multiple of 32");
-	}
+    if (threads <= 0 || threads % 32 != 0) {
+        throw KeySearchException("The number of threads must be a multiple of 32");
+    }
 
-	if (pointsPerThread <= 0) {
-		throw KeySearchException("At least 1 point per thread required");
-	}
+    if (pointsPerThread <= 0) {
+        throw KeySearchException("At least 1 point per thread required");
+    }
 
-	// Specifying blocks on the commandline is depcreated but still supported. If there is no value for
-	// blocks, devide the threads evenly among the multi-processors
-	if (blocks == 0) {
-		if (threads % info.mpCount != 0) {
-			throw KeySearchException("The number of threads must be a multiple of " + util::format("%d", info.mpCount));
-		}
+    if (blocks == 0) {
+        if (threads % info.mpCount != 0) {
+            throw KeySearchException("The number of threads must be a multiple of " + util::format("%d", info.mpCount));
+        }
 
-		_threads = threads / info.mpCount;
+        _threads = threads / info.mpCount;
+        _blocks = info.mpCount;
 
-		_blocks = info.mpCount;
+        while (_threads > 512) {
+            _threads /= 2;
+            _blocks *= 2;
+        }
+    }
+    else {
+        _threads = threads;
+        _blocks = blocks;
+    }
 
-		while (_threads > 512) {
-			_threads /= 2;
-			_blocks *= 2;
-		}
-	}
-	else {
-		_threads = threads;
-		_blocks = blocks;
-	}
-
-	_iterations = 0;
-
-	_device = device;
-
-	_pointsPerThread = pointsPerThread;
+    _iterations = 0;
+    _device = device;
+    _pointsPerThread = pointsPerThread;
+    _excludeOnPairs = false;
+    _requiredConsecutivePairs = 1;
 }
 
 void CudaKeySearchDevice::init(const secp256k1::uint256& start, int compression, int searchMode, const secp256k1::uint256& stride)
 {
-	if (start.cmp(secp256k1::N) >= 0) {
-		throw KeySearchException("Starting key is out of range");
-	}
+    if (start.cmp(secp256k1::N) >= 0) {
+        throw KeySearchException("Starting key is out of range");
+    }
 
-	_startExponent = start;
+    _startExponent = start;
+    _compression = compression;
+    _searchMode = searchMode;
+    _stride = stride;
 
-	_compression = compression;
+    cudaCall(cudaSetDevice(_device));
+    cudaCall(cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync));
+    cudaCall(cudaDeviceSetCacheConfig(cudaFuncCachePreferL1));
 
-	_searchMode = searchMode;
+    generateStartingPoints();
 
-	_stride = stride;
+    cudaCall(allocateChainBuf(_threads * _blocks * _pointsPerThread));
 
-	cudaCall(cudaSetDevice(_device));
+    secp256k1::ecpoint g = secp256k1::G();
+    secp256k1::ecpoint p = secp256k1::multiplyPoint(secp256k1::uint256((uint64_t)_threads * _blocks * _pointsPerThread) * _stride, g);
 
-	// Block on kernel calls
-	cudaCall(cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync));
-
-	// Use a larger portion of shared memory for L1 cache
-	cudaCall(cudaDeviceSetCacheConfig(cudaFuncCachePreferL1));
-
-	generateStartingPoints();
-
-	cudaCall(allocateChainBuf(_threads * _blocks * _pointsPerThread));
-
-	// Set the incrementor
-	secp256k1::ecpoint g = secp256k1::G();
-	secp256k1::ecpoint p = secp256k1::multiplyPoint(secp256k1::uint256((uint64_t)_threads * _blocks * _pointsPerThread) * _stride, g);
-
-	cudaCall(_resultList.init(sizeof(CudaDeviceResult), 16));
-
-	cudaCall(setIncrementorPoint(p.x, p.y));
+    cudaCall(_resultList.init(sizeof(CudaDeviceResult), 16));
+    cudaCall(setIncrementorPoint(p.x, p.y));
 }
 
 CudaKeySearchDevice::~CudaKeySearchDevice()
@@ -207,23 +195,22 @@ void CudaKeySearchDevice::setTargets(const std::set<KeySearchTargetXPoint>& targ
 
 void CudaKeySearchDevice::doStep()
 {
-	uint64_t numKeys = (uint64_t)_blocks * _threads * _pointsPerThread;
+    uint64_t numKeys = (uint64_t)_blocks * _threads * _pointsPerThread;
 
-	try {
-		if (_iterations < 2 && _startExponent.cmp(numKeys) <= 0) {
-			callKeyFinderKernel(_blocks, _threads, _pointsPerThread, true, _compression, _searchMode);
-		}
-		else {
-			callKeyFinderKernel(_blocks, _threads, _pointsPerThread, false, _compression, _searchMode);
-		}
-	}
-	catch (cuda::CudaException ex) {
-		throw KeySearchException(ex.msg);
-	}
+    try {
+        if (_iterations < 2 && _startExponent.cmp(numKeys) <= 0) {
+            callKeyFinderKernel(_blocks, _threads, _pointsPerThread, true, _compression, _searchMode, _excludeOnPairs, _requiredConsecutivePairs);
+        }
+        else {
+            callKeyFinderKernel(_blocks, _threads, _pointsPerThread, false, _compression, _searchMode, _excludeOnPairs, _requiredConsecutivePairs);
+        }
+    }
+    catch (cuda::CudaException ex) {
+        throw KeySearchException(ex.msg);
+    }
 
-	getResultsInternal();
-
-	_iterations++;
+    getResultsInternal();
+    _iterations++;
 }
 
 uint64_t CudaKeySearchDevice::keysPerStep()
@@ -472,4 +459,15 @@ void CudaKeySearchDevice::setExcludeOnPairs(bool exclude)
 void CudaKeySearchDevice::setRequiredConsecutivePairs(int n)
 {
     _requiredConsecutivePairs = n;
+}
+
+cudaError_t CudaKeySearchDevice::callKeyFinderKernel(int blocks, int threads, int points, bool useDouble, int compression, int searchMode, bool excludeOnPairs, int requiredPairs)
+{
+    if(useDouble) {
+        keyFinderKernelWithDouble<<<blocks, threads>>>(points, compression, searchMode, excludeOnPairs, requiredPairs);
+    } else {
+        keyFinderKernel<<<blocks, threads>>>(points, compression, searchMode, excludeOnPairs, requiredPairs);
+    }
+
+    return cudaGetLastError();
 }
