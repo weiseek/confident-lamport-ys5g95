@@ -295,6 +295,11 @@ bool CudaKeySearchDevice::isTargetInListXPoint(const unsigned int point[8])
 	return false;
 }
 
+bool CudaKeySearchDevice::shouldExcludeKey(const uint256_t& privateKey)
+{
+    return !hasExactlyOnePairOfConsecutiveDigits(privateKey);
+}
+
 uint32_t CudaKeySearchDevice::getPrivateKeyOffset(int thread, int block, int idx)
 {
 	// Total number of threads
