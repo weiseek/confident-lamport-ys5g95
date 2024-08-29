@@ -9,7 +9,6 @@
 #include "CudaHashLookup.h"
 #include "CudaAtomicList.h"
 #include "../CudaUtil/cudaUtil.h"
-#include "../Util/KeyUtil.h"
 
 // Structures that exist on both host and device side
 struct CudaDeviceResult {
@@ -74,8 +73,6 @@ private:
 	secp256k1::uint256 _stride;
 
 	//bool verifyKeyHash160(const secp256k1::uint256& privateKey, const secp256k1::ecpoint& publicKey, const unsigned int hash[5], bool compressed);
-
-	bool shouldExcludeKey(const uint256_t& privateKey);
 
 public:
 
