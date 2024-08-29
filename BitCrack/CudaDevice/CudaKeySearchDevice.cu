@@ -137,140 +137,138 @@ __device__ void setResultFound(int idx, bool compressed, unsigned int x[8], unsi
 	atomicListAdd(&r, sizeof(r));
 }
 
-__device__ bool hasExactlyNPairsOfConsecutiveDigits(const unsigned int* privateKey, int n)
+__device__ void doIteration(int pointsPerThread, int compression, int searchMode)
 {
-    int pairCount = 0;
-    unsigned int lastDigit = privateKey[0] & 0xF;
+	unsigned int* chain = _CHAIN[0];
+	unsigned int* xPtr = ec::getXPtr();
+	unsigned int* yPtr = ec::getYPtr();
 
-    for(int i = 0; i < 64; i++) {
-        unsigned int currentDigit = (privateKey[i / 8] >> ((i % 8) * 4)) & 0xF;
-        if(currentDigit == lastDigit) {
-            pairCount++;
-            if(pairCount > n) {
-                return false;
-            }
-            i++; // Skip next digit as it's part of the pair
-        }
-        lastDigit = currentDigit;
-    }
+	// Multiply together all (_Gx - x) and then invert
+	unsigned int inverse[8] = { 0,0,0,0,0,0,0,1 };
+	for (int i = 0; i < pointsPerThread; i++) {
+		unsigned int x[8];
 
-    return pairCount == n;
+		unsigned int digest[5];
+
+		readInt(xPtr, i, x);
+
+		if (searchMode == SearchMode::ADDRESS) {
+
+			if (compression == PointCompressionType::UNCOMPRESSED || compression == PointCompressionType::BOTH) {
+				unsigned int y[8];
+				readInt(yPtr, i, y);
+
+				hashPublicKey(x, y, digest);
+
+				if (checkHash(digest)) {
+					setResultFound(i, false, x, y, digest);
+				}
+			}
+
+			if (compression == PointCompressionType::COMPRESSED || compression == PointCompressionType::BOTH) {
+				hashPublicKeyCompressed(x, readIntLSW(yPtr, i), digest);
+
+				if (checkHash(digest)) {
+					unsigned int y[8];
+					readInt(yPtr, i, y);
+					setResultFound(i, true, x, y, digest);
+				}
+			}
+		}
+		else {
+			if (checkXPoint(x)) {
+				unsigned int y[8];
+				readInt(yPtr, i, y);
+				hashPublicKeyCompressed(x, readIntLSW(yPtr, i), digest);
+				setResultFound(i, true, x, y, digest);
+			}
+		}
+
+		beginBatchAdd(_INC_X, x, chain, i, i, inverse);
+	}
+
+	doBatchInverse(inverse);
+
+	for (int i = pointsPerThread - 1; i >= 0; i--) {
+
+		unsigned int newX[8];
+		unsigned int newY[8];
+
+		completeBatchAdd(_INC_X, _INC_Y, xPtr, yPtr, i, i, chain, inverse, newX, newY);
+
+		writeInt(xPtr, i, newX);
+		writeInt(yPtr, i, newY);
+	}
+	__syncthreads();
 }
 
-__device__ void doIteration(int pointsPerThread, int compression, int searchMode, bool excludeOnPairs, int requiredPairs)
+__device__ void doIterationWithDouble(int pointsPerThread, int compression, int searchMode)
 {
-    unsigned int* chain = _CHAIN[0];
-    unsigned int* xPtr = ec::getXPtr();
-    unsigned int* yPtr = ec::getYPtr();
+	unsigned int* chain = _CHAIN[0];
+	unsigned int* xPtr = ec::getXPtr();
+	unsigned int* yPtr = ec::getYPtr();
 
-    unsigned int inverse[8] = { 0,0,0,0,0,0,0,1 };
-    for (int i = 0; i < pointsPerThread; i++) {
-        unsigned int x[8];
-        unsigned int digest[5];
+	// Multiply together all (_Gx - x) and then invert
+	unsigned int inverse[8] = { 0,0,0,0,0,0,0,1 };
+	for (int i = 0; i < pointsPerThread; i++) {
+		unsigned int x[8];
 
-        readInt(xPtr, i, x);
+		unsigned int digest[5];
 
-        // Check for consecutive digit pairs if exclusion is enabled
-        if (!excludeOnPairs || hasExactlyNPairsOfConsecutiveDigits(x, requiredPairs)) {
-            if (searchMode == SearchMode::ADDRESS) {
-                if (compression == PointCompressionType::UNCOMPRESSED || compression == PointCompressionType::BOTH) {
-                    unsigned int y[8];
-                    readInt(yPtr, i, y);
-                    hashPublicKey(x, y, digest);
-                    if (checkHash(digest)) {
-                        setResultFound(i, false, x, y, digest);
-                    }
-                }
-                if (compression == PointCompressionType::COMPRESSED || compression == PointCompressionType::BOTH) {
-                    hashPublicKeyCompressed(x, readIntLSW(yPtr, i), digest);
-                    if (checkHash(digest)) {
-                        unsigned int y[8];
-                        readInt(yPtr, i, y);
-                        setResultFound(i, true, x, y, digest);
-                    }
-                }
-            }
-            else {
-                if (checkXPoint(x)) {
-                    unsigned int y[8];
-                    readInt(yPtr, i, y);
-                    hashPublicKeyCompressed(x, readIntLSW(yPtr, i), digest);
-                    setResultFound(i, true, x, y, digest);
-                }
-            }
-        }
+		readInt(xPtr, i, x);
 
-        beginBatchAdd(_INC_X, x, chain, i, i, inverse);
-    }
+		if (searchMode == SearchMode::ADDRESS) {
 
-    doBatchInverse(inverse);
+			// uncompressed
+			if (compression == PointCompressionType::UNCOMPRESSED || compression == PointCompressionType::BOTH) {
+				unsigned int y[8];
+				readInt(yPtr, i, y);
+				hashPublicKey(x, y, digest);
 
-    for (int i = pointsPerThread - 1; i >= 0; i--) {
-        unsigned int newX[8];
-        unsigned int newY[8];
-        completeBatchAdd(_INC_X, _INC_Y, xPtr, yPtr, i, i, chain, inverse, newX, newY);
-        writeInt(xPtr, i, newX);
-        writeInt(yPtr, i, newY);
-    }
-    __syncthreads();
-}
+				if (checkHash(digest)) {
+					setResultFound(i, false, x, y, digest);
+				}
+			}
 
-__device__ void doIterationWithDouble(int pointsPerThread, int compression, int searchMode, bool excludeOnPairs, int requiredPairs)
-{
-    unsigned int* chain = _CHAIN[0];
-    unsigned int* xPtr = ec::getXPtr();
-    unsigned int* yPtr = ec::getYPtr();
+			// compressed
+			if (compression == PointCompressionType::COMPRESSED || compression == PointCompressionType::BOTH) {
 
-    unsigned int inverse[8] = { 0,0,0,0,0,0,0,1 };
-    for (int i = 0; i < pointsPerThread; i++) {
-        unsigned int x[8];
-        unsigned int digest[5];
+				hashPublicKeyCompressed(x, readIntLSW(yPtr, i), digest);
 
-        readInt(xPtr, i, x);
+				if (checkHash(digest)) {
 
-        // Check for consecutive digit pairs if exclusion is enabled
-        if (!excludeOnPairs || hasExactlyNPairsOfConsecutiveDigits(x, requiredPairs)) {
-            if (searchMode == SearchMode::ADDRESS) {
-                if (compression == PointCompressionType::UNCOMPRESSED || compression == PointCompressionType::BOTH) {
-                    unsigned int y[8];
-                    readInt(yPtr, i, y);
-                    hashPublicKey(x, y, digest);
-                    if (checkHash(digest)) {
-                        setResultFound(i, false, x, y, digest);
-                    }
-                }
-                if (compression == PointCompressionType::COMPRESSED || compression == PointCompressionType::BOTH) {
-                    hashPublicKeyCompressed(x, readIntLSW(yPtr, i), digest);
-                    if (checkHash(digest)) {
-                        unsigned int y[8];
-                        readInt(yPtr, i, y);
-                        setResultFound(i, true, x, y, digest);
-                    }
-                }
-            }
-            else {
-                if (checkXPoint(x)) {
-                    unsigned int y[8];
-                    readInt(yPtr, i, y);
-                    hashPublicKeyCompressed(x, readIntLSW(yPtr, i), digest);
-                    setResultFound(i, true, x, y, digest);
-                }
-            }
-        }
+					unsigned int y[8];
+					readInt(yPtr, i, y);
 
-        beginBatchAddWithDouble(_INC_X, _INC_Y, xPtr, chain, i, i, inverse);
-    }
+					setResultFound(i, true, x, y, digest);
+				}
+			}
+		}
+		else {
+			if (checkXPoint(x)) {
+				unsigned int y[8];
+				readInt(yPtr, i, y);
+				hashPublicKeyCompressed(x, readIntLSW(yPtr, i), digest);
+				setResultFound(i, true, x, y, digest);
+			}
+		}
 
-    doBatchInverse(inverse);
+		beginBatchAddWithDouble(_INC_X, _INC_Y, xPtr, chain, i, i, inverse);
+	}
 
-    for (int i = pointsPerThread - 1; i >= 0; i--) {
-        unsigned int newX[8];
-        unsigned int newY[8];
-        completeBatchAddWithDouble(_INC_X, _INC_Y, xPtr, yPtr, i, i, chain, inverse, newX, newY);
-        writeInt(xPtr, i, newX);
-        writeInt(yPtr, i, newY);
-    }
-    __syncthreads();
+	doBatchInverse(inverse);
+
+	for (int i = pointsPerThread - 1; i >= 0; i--) {
+
+		unsigned int newX[8];
+		unsigned int newY[8];
+
+		completeBatchAddWithDouble(_INC_X, _INC_Y, xPtr, yPtr, i, i, chain, inverse, newX, newY);
+
+		writeInt(xPtr, i, newX);
+		writeInt(yPtr, i, newY);
+	}
+	__syncthreads();
 }
 
 /**
